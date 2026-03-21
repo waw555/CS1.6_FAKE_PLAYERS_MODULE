@@ -1,213 +1,298 @@
+#include "fake_players_module.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <ctime>
 #include <fstream>
-#include <iomanip>
 #include <random>
 #include <sstream>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace fmp {
 
 struct TimeRule {
-    int fromMinutes{};
-    int toMinutes{};
-    int fakeMin{};
-    int fakeMax{};
+    int from_minutes{};
+    int to_minutes{};
+    int fake_min{};
+    int fake_max{};
 };
 
 struct OnlineRule {
-    int realMin{};
-    int realMax{};
-    int fakeMin{};
-    int fakeMax{};
+    int real_min{};
+    int real_max{};
+    int fake_min{};
+    int fake_max{};
 };
 
 struct Config {
-    bool dynamicMode{false};
-    int staticCount{12};
-    int dynamicBase{10};
-    int dynamicAdd{8};
-    int dynamicDivisor{2};
-    std::vector<TimeRule> timeRules;
-    std::vector<OnlineRule> onlineRules;
+    bool dynamic_mode{false};
+    int static_count{12};
+    int dynamic_base{10};
+    int dynamic_add{8};
+    int dynamic_divisor{2};
+    std::vector<TimeRule> time_rules;
+    std::vector<OnlineRule> online_rules;
     std::vector<std::string> nicknames;
 };
 
 struct Snapshot {
-    int announcedPlayers{};
-    int announcedBots{};
-    std::vector<std::string> announcedNicknames;
+    int announced_players{};
+    int announced_bots{};
+    int fake_players{};
+    std::vector<std::string> announced_nicknames;
 };
 
 class Engine {
 public:
-    void reload(const std::string& schedulePath, const std::string& nicksPath) {
-        loadSchedule(schedulePath);
-        loadNicks(nicksPath);
+    bool reload(const std::string& schedule_path, const std::string& nicks_path) {
+        return load_schedule(schedule_path) && load_nicks(nicks_path);
     }
 
-    Snapshot buildSnapshot(int realPlayers) {
+    Snapshot build_snapshot(int real_players) {
         Snapshot out{};
-        int fakeCount = computeTarget(realPlayers);
-        out.announcedPlayers = std::max(0, realPlayers + fakeCount);
-        out.announcedBots = 0; // for A2S_INFO/A2S_PLAYER response shaping
+        const int fake_count = compute_target(real_players);
+        out.fake_players = std::max(0, fake_count);
+        out.announced_players = std::max(0, real_players) + out.fake_players;
+        out.announced_bots = 0;
+        out.announced_nicknames.reserve(static_cast<std::size_t>(out.fake_players));
 
-        for (int i = 0; i < fakeCount; ++i) {
-            out.announcedNicknames.push_back(nextNick());
+        for (int i = 0; i < out.fake_players; ++i) {
+            out.announced_nicknames.push_back(next_nick());
         }
+
+        last_snapshot_ = out;
         return out;
+    }
+
+    size_t nick_count() const {
+        return last_snapshot_.announced_nicknames.size();
+    }
+
+    const char* nick_at(size_t index) const {
+        if (index >= last_snapshot_.announced_nicknames.size()) {
+            return nullptr;
+        }
+        return last_snapshot_.announced_nicknames[index].c_str();
     }
 
 private:
     Config cfg_{};
-    std::size_t nickCursor_{0};
+    Snapshot last_snapshot_{};
+    std::size_t nick_cursor_{0};
     std::mt19937 rng_{std::random_device{}()};
 
-    static std::string trim(std::string s) {
-        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
-        std::size_t i = 0;
-        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
-        return s.substr(i);
+    static std::string trim(std::string value) {
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+            value.pop_back();
+        }
+
+        std::size_t offset = 0;
+        while (offset < value.size() && std::isspace(static_cast<unsigned char>(value[offset])) != 0) {
+            ++offset;
+        }
+
+        return value.substr(offset);
     }
 
-    static bool inRangeWrap(int now, int from, int to) {
-        if (from <= to) return now >= from && now <= to;
+    static bool in_range_wrap(int now, int from, int to) {
+        if (from <= to) {
+            return now >= from && now <= to;
+        }
         return now >= from || now <= to;
     }
 
-    int randomRange(int a, int b) {
-        if (b < a) std::swap(a, b);
+    int random_range(int a, int b) {
+        if (b < a) {
+            std::swap(a, b);
+        }
         std::uniform_int_distribution<int> dist(a, b);
         return dist(rng_);
     }
 
-    int parseClockToMinutes(const std::string& hhmm) {
-        auto pos = hhmm.find(':');
-        if (pos == std::string::npos) return -1;
-        int h = std::stoi(hhmm.substr(0, pos));
-        int m = std::stoi(hhmm.substr(pos + 1));
-        if (h < 0 || h > 23 || m < 0 || m > 59) return -1;
+    static int parse_clock_to_minutes(const std::string& hhmm) {
+        const auto pos = hhmm.find(':');
+        if (pos == std::string::npos) {
+            return -1;
+        }
+
+        const int h = std::stoi(hhmm.substr(0, pos));
+        const int m = std::stoi(hhmm.substr(pos + 1));
+        if (h < 0 || h > 23 || m < 0 || m > 59) {
+            return -1;
+        }
         return h * 60 + m;
     }
 
-    int nowMinutes() const {
-        auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        std::tm local{};
-#if defined(_WIN32)
-        localtime_s(&local, &t);
-#else
-        localtime_r(&t, &local);
-#endif
-        return local.tm_hour * 60 + local.tm_min;
+    static int now_minutes() {
+        const auto current_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::tm local_time{};
+    #if defined(_WIN32)
+        localtime_s(&local_time, &current_time);
+    #else
+        localtime_r(&current_time, &local_time);
+    #endif
+        return local_time.tm_hour * 60 + local_time.tm_min;
     }
 
-    int computeTarget(int realPlayers) {
-        int target = cfg_.dynamicMode
-            ? cfg_.dynamicBase + std::max(0, cfg_.dynamicAdd - realPlayers / std::max(1, cfg_.dynamicDivisor))
-            : cfg_.staticCount;
+    int compute_target(int real_players) {
+        int target = cfg_.dynamic_mode
+            ? cfg_.dynamic_base + std::max(0, cfg_.dynamic_add - std::max(0, real_players) / std::max(1, cfg_.dynamic_divisor))
+            : cfg_.static_count;
 
         int selected = -1;
-        int now = nowMinutes();
-        for (const auto& rule : cfg_.timeRules) {
-            if (inRangeWrap(now, rule.fromMinutes, rule.toMinutes)) {
-                selected = randomRange(rule.fakeMin, rule.fakeMax);
+        const int now = now_minutes();
+
+        for (const auto& rule : cfg_.time_rules) {
+            if (in_range_wrap(now, rule.from_minutes, rule.to_minutes)) {
+                selected = random_range(rule.fake_min, rule.fake_max);
                 break;
             }
         }
-        for (const auto& rule : cfg_.onlineRules) {
-            if (realPlayers >= rule.realMin && realPlayers <= rule.realMax) {
-                selected = randomRange(rule.fakeMin, rule.fakeMax);
+
+        for (const auto& rule : cfg_.online_rules) {
+            if (real_players >= rule.real_min && real_players <= rule.real_max) {
+                selected = random_range(rule.fake_min, rule.fake_max);
                 break;
             }
         }
-        if (selected >= 0) target = selected;
+
+        if (selected >= 0) {
+            target = selected;
+        }
+
         return std::max(0, target);
     }
 
-    std::string nextNick() {
+    std::string next_nick() {
         if (cfg_.nicknames.empty()) {
-            return "Player_" + std::to_string(randomRange(1000, 9999));
+            return "Player_" + std::to_string(random_range(1000, 9999));
         }
-        if (nickCursor_ >= cfg_.nicknames.size()) nickCursor_ = 0;
-        return cfg_.nicknames[nickCursor_++];
+
+        if (nick_cursor_ >= cfg_.nicknames.size()) {
+            nick_cursor_ = 0;
+        }
+
+        return cfg_.nicknames[nick_cursor_++];
     }
 
-    void loadNicks(const std::string& path) {
+    bool load_nicks(const std::string& path) {
         cfg_.nicknames.clear();
-        std::ifstream in(path);
+
+        std::ifstream input(path);
+        if (!input.is_open()) {
+            return false;
+        }
+
         std::string line;
-        while (std::getline(in, line)) {
+        while (std::getline(input, line)) {
             line = trim(line);
-            if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+            if (line.empty() || line[0] == ';' || line[0] == '#') {
+                continue;
+            }
             cfg_.nicknames.push_back(line);
         }
-        nickCursor_ = 0;
+
+        nick_cursor_ = 0;
+        return true;
     }
 
-    void loadSchedule(const std::string& path) {
-        cfg_.timeRules.clear();
-        cfg_.onlineRules.clear();
+    bool load_schedule(const std::string& path) {
+        cfg_.time_rules.clear();
+        cfg_.online_rules.clear();
 
-        std::ifstream in(path);
+        std::ifstream input(path);
+        if (!input.is_open()) {
+            return false;
+        }
+
         std::string line;
-        while (std::getline(in, line)) {
+        while (std::getline(input, line)) {
             line = trim(line);
-            if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+            if (line.empty() || line[0] == ';' || line[0] == '#') {
+                continue;
+            }
 
-            std::istringstream ss(line);
+            std::istringstream stream(line);
             std::string type;
-            ss >> type;
+            stream >> type;
 
             if (type == "TIME") {
                 std::string range;
-                TimeRule r{};
-                ss >> range >> r.fakeMin >> r.fakeMax;
-                auto dash = range.find('-');
-                if (dash == std::string::npos) continue;
-                r.fromMinutes = parseClockToMinutes(range.substr(0, dash));
-                r.toMinutes = parseClockToMinutes(range.substr(dash + 1));
-                if (r.fromMinutes < 0 || r.toMinutes < 0) continue;
-                cfg_.timeRules.push_back(r);
-            } else if (type == "ONLINE") {
-                OnlineRule r{};
-                ss >> r.realMin >> r.realMax >> r.fakeMin >> r.fakeMax;
-                cfg_.onlineRules.push_back(r);
+                TimeRule rule{};
+                stream >> range >> rule.fake_min >> rule.fake_max;
+                const auto dash = range.find('-');
+                if (dash == std::string::npos) {
+                    continue;
+                }
+                rule.from_minutes = parse_clock_to_minutes(range.substr(0, dash));
+                rule.to_minutes = parse_clock_to_minutes(range.substr(dash + 1));
+                if (rule.from_minutes < 0 || rule.to_minutes < 0) {
+                    continue;
+                }
+                cfg_.time_rules.push_back(rule);
+                continue;
+            }
+
+            if (type == "ONLINE") {
+                OnlineRule rule{};
+                stream >> rule.real_min >> rule.real_max >> rule.fake_min >> rule.fake_max;
+                cfg_.online_rules.push_back(rule);
             }
         }
+
+        return true;
     }
 };
 
 } // namespace fmp
 
-// --- exported C ABI for Metamod/ReHLDS glue layer ---
+struct fmp_handle_s {
+    fmp::Engine engine;
+};
+
 extern "C" {
 
-void* fmp_create() {
-    return new fmp::Engine();
+fmp_handle_t* fmp_create(void) {
+    return new fmp_handle_s();
 }
 
-void fmp_destroy(void* handle) {
-    delete static_cast<fmp::Engine*>(handle);
+void fmp_destroy(fmp_handle_t* handle) {
+    delete handle;
 }
 
-void fmp_reload(void* handle, const char* schedulePath, const char* nicksPath) {
-    if (!handle || !schedulePath || !nicksPath) return;
-    static_cast<fmp::Engine*>(handle)->reload(schedulePath, nicksPath);
+int fmp_reload(fmp_handle_t* handle, const char* schedule_path, const char* nicks_path) {
+    if (handle == nullptr || schedule_path == nullptr || nicks_path == nullptr) {
+        return 0;
+    }
+    return handle->engine.reload(schedule_path, nicks_path) ? 1 : 0;
 }
 
-int fmp_make_snapshot(void* handle, int realPlayers, int* announcedPlayers, int* announcedBots) {
-    if (!handle || !announcedPlayers || !announcedBots) return 0;
-    auto snapshot = static_cast<fmp::Engine*>(handle)->buildSnapshot(realPlayers);
-    *announcedPlayers = snapshot.announcedPlayers;
-    *announcedBots = snapshot.announcedBots;
-    return static_cast<int>(snapshot.announcedNicknames.size());
+int fmp_make_snapshot(fmp_handle_t* handle, int real_players, fmp_snapshot_t* snapshot) {
+    if (handle == nullptr || snapshot == nullptr) {
+        return 0;
+    }
+
+    const auto value = handle->engine.build_snapshot(real_players);
+    snapshot->announced_players = value.announced_players;
+    snapshot->announced_bots = value.announced_bots;
+    snapshot->fake_players = value.fake_players;
+    return 1;
 }
 
-// NOTE: Integration point.
-// A real Metamod-R/ReHLDS module should call fmp_make_snapshot()
-// inside A2S_INFO/A2S_PLAYER query hooks and serialize snapshot data to UDP response.
-
+const char* fmp_snapshot_nick_at(fmp_handle_t* handle, size_t index) {
+    if (handle == nullptr) {
+        return nullptr;
+    }
+    return handle->engine.nick_at(index);
 }
+
+size_t fmp_snapshot_nick_count(fmp_handle_t* handle) {
+    if (handle == nullptr) {
+        return 0;
+    }
+    return handle->engine.nick_count();
+}
+
+} // extern "C"
