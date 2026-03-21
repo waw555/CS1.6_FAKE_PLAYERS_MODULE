@@ -1,26 +1,51 @@
-# CS 1.6 Fake Players **Module** (Metamod-R / ReHLDS)
+# CS 1.6 Fake Players Module
 
-Этот репозиторий теперь ориентирован на **серверный модуль**, а не на AMX Mod X плагин.
+Модуль собирается в `libfake_players_module.so` и предоставляет C ABI для слоя интеграции с ReHLDS / Metamod-R / ReGameDLL.
 
-Цель: формировать данные для `A2S_INFO` / `A2S_PLAYER`, чтобы мониторинги Steam видели настраиваемый онлайн и список ников без необходимости держать fake clients в слотах сервера.
+## Что делает модуль
 
-## Что реализовано
+- Загружает правила из `configs/fake_monitor_players.ini`.
+- Загружает список ников из `configs/fake_monitor_nicks.ini`.
+- По реальному онлайну строит snapshot с:
+  - итоговым количеством игроков для анонса в `A2S_INFO`;
+  - количеством фейковых игроков;
+  - списком фейковых ников для `A2S_PLAYER`.
+- Экспортирует стабильный C API, который можно дергать из glue-слоя Metamod-R.
 
-- Ядро модуля на C++ (`module/src/fake_players_module.cpp`):
-  - статический/динамический расчет фейкового онлайна;
-  - правила по времени (`TIME`) и реальному онлайну (`ONLINE`);
-  - загрузка ников из отдельного файла;
-  - подготовка «снимка» (snapshot) с целевыми значениями: players/bots/nicks.
-- C ABI-функции для будущей интеграции в Metamod-R/ReHLDS glue:
-  - `fmp_create`, `fmp_destroy`, `fmp_reload`, `fmp_make_snapshot`.
+## Ограничение
 
-## Важно
+Этот репозиторий собирает именно **ядро модуля**. Для подмены ответов в Steam query и отправки измененных данных наружу нужен слой интеграции, который будет вызывать API модуля внутри query hooks вашего ReHLDS/Metamod-R проекта.
 
-Текущий код — это **core для модуля + экспорт API**, который нужно подключить к вашему обработчику A2S на уровне Metamod-R/ReHLDS.
+То есть реализация логики готова, но точка встраивания зависит от конкретного SDK/заголовков вашего сервера.
 
-То есть:
-- логика расчета и конфиги готовы;
-- сериализация UDP-ответов A2S и engine hooks должны быть добавлены в вашем слое интеграции (или следующим шагом в этом репозитории).
+## C API
+
+```c
+fmp_handle_t* fmp_create(void);
+void fmp_destroy(fmp_handle_t* handle);
+int fmp_reload(fmp_handle_t* handle, const char* schedule_path, const char* nicks_path);
+int fmp_make_snapshot(fmp_handle_t* handle, int real_players, fmp_snapshot_t* snapshot);
+const char* fmp_snapshot_nick_at(fmp_handle_t* handle, size_t index);
+size_t fmp_snapshot_nick_count(fmp_handle_t* handle);
+```
+
+## Сборка в Debian 13
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+## Интеграция с Metamod-R / ReHLDS
+
+Типовой сценарий:
+
+1. Создать `fmp_handle_t*` при старте модуля.
+2. Вызвать `fmp_reload(...)` после загрузки конфигов или по server command reload.
+3. Перед формированием `A2S_INFO` вызвать `fmp_make_snapshot(...)`, передав реальное число игроков.
+4. Использовать `snapshot.announced_players` как количество игроков в ответе.
+5. Использовать `fmp_snapshot_nick_count()` и `fmp_snapshot_nick_at()` для заполнения списка игроков в `A2S_PLAYER`.
 
 ## Конфиги
 
@@ -39,29 +64,5 @@ ONLINE 13 20 4 8
 ONLINE 21 32 0 2
 ```
 
-- `ONLINE` имеет приоритет над `TIME`.
-
-### `configs/fake_monitor_nicks.ini`
-
-Один ник на строку.
-
-## Сборка (Debian Linux)
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-```
-
-Результат: `build/libfake_players_module.so`
-
-## Следующий шаг для полного A2S-модуля
-
-1. Подключить `.so` в ваш Metamod-R/ReHLDS проект.
-2. В query hooks:
-   - в `A2S_INFO` подставлять `announcedPlayers`/`announcedBots`;
-   - в `A2S_PLAYER` формировать список игроков из snapshot-ников.
-3. На reload карты/конфига вызывать `fmp_reload(...)`.
-
----
-
-Если хотите, следующим коммитом я добавлю именно glue-слой под конкретный API ReHLDS/Metamod-R (под ваши заголовки и версию SDK), чтобы это был полностью рабочий бинарный модуль под ваш сервер.
+- `ONLINE` rules имеют приоритет над `TIME`.
+- Если правила не совпали, используется базовое статическое значение.
